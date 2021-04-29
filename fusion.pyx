@@ -9,7 +9,9 @@ cdef extern from "tsdf.h":
     cdef cppclass Volume:
         float* data
         float *weight
-        int vol_dim
+        int vol_dim_w
+        int vol_dim_h
+        int vol_dim_d
         float voxel_size
         float origin_x
         float origin_y
@@ -30,7 +32,7 @@ cdef extern from "tsdf.h":
 
 
 
-def fusion_tsdf(depth, weight, K, R, T, voxel_size=0.02, vol_dim=256, origin_x=0, origin_y=0, origin_z=0, truncation_factor=5):
+def fusion_tsdf(depth, weight, K, R, T, voxel_size=0.02, vol_dim=(256, 256, 256), origin_x=0, origin_y=0, origin_z=0, truncation_factor=5):
     """
     :param depth: N*h*w depth maps
     :param weight: N*h*w corresponding weight for each depth maps
@@ -50,32 +52,27 @@ def fusion_tsdf(depth, weight, K, R, T, voxel_size=0.02, vol_dim=256, origin_x=0
     views.depth = &(depth_view[0, 0, 0])
     views.weight = &(weight_view[0, 0, 0])
     views.rows = depth.shape[1]
-    views.cols = depth.shape[0]
+    views.cols = depth.shape[2]
     views.K = &(K_view[0, 0, 0])
     views.R = &(R_view[0, 0, 0])
     views.T = &(T_view[0, 0, 0])
 
     cdef Volume volume
-    vol = np.ones((1, vol_dim, vol_dim, vol_dim), dtype=np.float32)
-    _weight = np.ones((1, vol_dim, vol_dim, vol_dim), dtype=np.float32)
-    cdef float[:, :, :, ::1] vol_view = vol
-    cdef float[:, :, :, ::1] _weight_view = _weight
-    volume.data = &(vol_view[0, 0, 0, 0])
-    volume.weight = &(_weight_view[0, 0, 0, 0])
-    volume.vol_dim = vol_dim
+    vol_dim_w, vol_dim_h, vol_dim_d = vol_dim
+    vol = np.zeros((vol_dim_d, vol_dim_h, vol_dim_w), dtype=np.float32)
+    _weight = np.zeros((vol_dim_d, vol_dim_h, vol_dim_w), dtype=np.float32)
+    cdef float[:, :, ::1] vol_view = vol
+    cdef float[:, :, ::1] _weight_view = _weight
+    volume.data = &(vol_view[0, 0, 0])
+    volume.weight = &(_weight_view[0, 0, 0])
+    volume.vol_dim_w = vol_dim_w
+    volume.vol_dim_h = vol_dim_h
+    volume.vol_dim_d = vol_dim_d
     volume.voxel_size = voxel_size
     volume.origin_x = origin_x
     volume.origin_y = origin_y
     volume.origin_z = origin_z
 
-    fusion(volume, views, truncation_factor)
-
-
- 
-def print_hello(): 
-    depth = np.empty((100, 20, 20))
-    weight = np.empty((100, 20, 20))
-    K = np.empty((100, 3, 3))
-    R = np.empty((100, 3, 3)) 
-    T = np.empty((100, 3, 1))    
-    fusion_tsdf(depth, weight, K, R, T, voxel_size=0.02, vol_dim=256, origin_x=0, origin_y=0, origin_z=0,truncation_factor=5)
+    truncation_distance = truncation_factor * voxel_size
+    fusion(volume, views, truncation_distance)
+    return vol, _weight

@@ -28,13 +28,15 @@ inline void __checkCudaErrors(cudaError err, const char *file, const int line )
 
 const int THREADS_PER_BLOCK = 1024;
 
-inline int getNumBlock(int N) { return (N + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK; }
+inline int getNumBlock(int N, int threads_per_block) { return (N + threads_per_block - 1) / threads_per_block; }
 
 class Volume {
 public:
     float *data;
     float *weight;
-    int vol_dim;
+    int vol_dim_w;
+    int vol_dim_h;
+    int vol_dim_d;
     float voxel_size;
     float origin_x;
     float origin_y;
@@ -59,23 +61,23 @@ void fusion(Volume &vol, Views &views, float truncation_distance);
  * transfer voxel coordinates to world coordinates
  */
 GLOBAL_2_HOST
-inline void idx2ijk(int index, int res, int &i, int &j, int &k) {
-    i = fmodf(index, res);
-    j = fmodf((index - i) / res, res);
-    k = index / (res * res);
+inline void idx2ijk(int index, int vol_dim_w, int vol_dim_h, int vol_dim_d, int &i, int &j, int &k) {
+    i = index % vol_dim_w;
+    j = ((index - i) / vol_dim_w) % vol_dim_h;
+    k = index / (vol_dim_w * vol_dim_h);
 }
 
 GLOBAL_2_HOST
 inline void ijk2xyz(int i, int j, int k, float voxel_size, float origin_x, float origin_y, float origin_z, float &x, float &y, float &z) {
-    x = (i + 0.5) * voxel_size + origin_x;
-    y = (j + 0.5) * voxel_size + origin_y;
-    z = (k + 0.5) * voxel_size + origin_z;
+    x = i * voxel_size + origin_x;
+    y = j * voxel_size + origin_y;
+    z = k * voxel_size + origin_z;
 }
 
 GLOBAL_2_HOST
 inline void xyz2uv(int idx, const Views *views, float x, float y, float z, float &u, float &v, float &d) {
     float *K = views->K + idx * 9;
-    float *R = views->K + idx * 9;
+    float *R = views->R + idx * 9;
     float *T = views->T + idx * 3;
 
     float xt = R[0] * x + R[1] * y + R[2] * z + T[0];
@@ -88,75 +90,87 @@ inline void xyz2uv(int idx, const Views *views, float x, float y, float z, float
 
     u = u / d;
     v = v / d;
-
-}
-
-
-void mem_alloc_views(Views &views_gpu, Views &views_cpu) {
-    views_gpu.n_views = views_cpu.n_views;
-    views_gpu.rows = views_cpu.rows;
-    views_gpu.cols = views_cpu.cols;
-    int N = views_cpu.n_views * views_cpu.rows * views_cpu.cols;
-
-    gpuErrchk(cudaMallocManaged(&views_gpu.depth, N * sizeof(float)));
-    gpuErrchk(cudaMallocManaged(&views_gpu.weight, N * sizeof(float)));
-    gpuErrchk(cudaMemcpy(&views_gpu.depth, &views_cpu.depth, sizeof(views_cpu.depth), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(&views_gpu.weight, &views_cpu.weight, sizeof(views_cpu.weight), cudaMemcpyHostToDevice));
-
-    N = views_cpu.n_views * 3 * 3;
-    gpuErrchk(cudaMallocManaged(&views_gpu.K, N * sizeof(float)));
-    gpuErrchk(cudaMallocManaged(&views_gpu.R, N * sizeof(float)));
-    gpuErrchk(cudaMemcpy(&views_gpu.K, &views_cpu.K, N * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(&views_gpu.R, &views_cpu.R, N * sizeof(float), cudaMemcpyHostToDevice));
-
-    N = views_cpu.n_views * 3;
-    gpuErrchk(cudaMallocManaged(&views_gpu.T, N * sizeof(float)));
-    gpuErrchk(cudaMemcpy(&views_gpu.T, &views_cpu.T, N * sizeof(float), cudaMemcpyHostToDevice));
+    //printf("Projected coordinates %f %f %f\n", u, v, d);
 }
 
 void host_2_device(const float *host, float *device, int N) {
-    printf("%d", N);
     gpuErrchk(cudaMemcpy(device, host, N*sizeof(float), cudaMemcpyHostToDevice));
 }
 
-void device_malloc(float *device, int N) {
-    gpuErrchk(cudaMalloc(&device, N*sizeof(float)));
+void device_2_host(float *host, const float *device, int N) {
+    gpuErrchk(cudaMemcpy(host, device, N*sizeof(float), cudaMemcpyDeviceToHost));
 }
 
-void mem_alloc_volume(Volume &vol_gpu, Volume &vol_cpu) {
-    int N = vol_cpu.vol_dim * vol_cpu.vol_dim * vol_cpu.vol_dim;
-    device_malloc(vol_gpu.data, N);
-    device_malloc(vol_gpu.weight, N);
+void mem_malloc_gpu(float **device, int N) {
+    gpuErrchk(cudaMallocManaged(device, N*sizeof(float)));
+}
+
+
+void mem_alloc_views_gpu(Views &views_gpu, Views &views_cpu) {
+    int N = views_cpu.n_views * views_cpu.rows * views_cpu.cols;
+    mem_malloc_gpu(&views_gpu.depth, N);
+    mem_malloc_gpu(&views_gpu.weight, N);
+    host_2_device(views_cpu.depth, views_gpu.depth, N);
+    host_2_device(views_cpu.weight, views_gpu.weight, N);
+
+    N = views_cpu.n_views * 3 * 3;
+    mem_malloc_gpu(&views_gpu.K, N);
+    mem_malloc_gpu(&views_gpu.R, N);
+    host_2_device(views_cpu.K, views_gpu.K, N);
+    host_2_device(views_cpu.R, views_gpu.R, N);
+
+    N = views_cpu.n_views * 3;
+    mem_malloc_gpu(&views_gpu.T, N);
+    host_2_device(views_cpu.T, views_gpu.T, N);
+
+    views_gpu.n_views = views_cpu.n_views;
+    views_gpu.rows = views_cpu.rows;
+    views_gpu.cols = views_cpu.cols;
+}
+
+void mem_alloc_volume_gpu(Volume &vol_gpu, Volume &vol_cpu) {
+    int N = vol_cpu.vol_dim_w * vol_cpu.vol_dim_h * vol_cpu.vol_dim_d;
+    mem_malloc_gpu(&vol_gpu.data, N);
+    mem_malloc_gpu(&vol_gpu.weight, N);
+
     host_2_device(vol_cpu.data, vol_gpu.data, N);
     host_2_device(vol_cpu.weight, vol_gpu.weight, N);
 
-    vol_gpu.vol_dim = vol_cpu.vol_dim;
+    vol_gpu.vol_dim_w = vol_cpu.vol_dim_w;
+    vol_gpu.vol_dim_h = vol_cpu.vol_dim_h;
+    vol_gpu.vol_dim_d = vol_cpu.vol_dim_d;
     vol_gpu.voxel_size = vol_cpu.voxel_size;
-    vol_gpu.origin_x = vol_gpu.origin_x;
-    vol_gpu.origin_y = vol_gpu.origin_z;
-    vol_gpu.origin_z = vol_gpu.origin_z;
+    vol_gpu.origin_x = vol_cpu.origin_x;
+    vol_gpu.origin_y = vol_cpu.origin_z;
+    vol_gpu.origin_z = vol_cpu.origin_z;
 }
 
+void mem_alloc_volume_cpu(Volume &vol_gpu, Volume &vol_cpu) {
+    int N = vol_gpu.vol_dim_w * vol_gpu.vol_dim_h * vol_gpu.vol_dim_d;
 
-void mem_free_views(Views &views_gpu) {
-    cudaFree(&views_gpu.n_views);
+    device_2_host(vol_cpu.data, vol_gpu.data, N);
+    device_2_host(vol_cpu.weight, vol_gpu.weight, N);
+
+    vol_cpu.vol_dim_w = vol_gpu.vol_dim_w;
+    vol_cpu.vol_dim_h = vol_gpu.vol_dim_h;
+    vol_cpu.vol_dim_d = vol_gpu.vol_dim_d;
+    vol_cpu.voxel_size = vol_gpu.voxel_size;
+    vol_cpu.origin_x = vol_gpu.origin_x;
+    vol_cpu.origin_y = vol_gpu.origin_z;
+    vol_cpu.origin_z = vol_gpu.origin_z;
+}
+
+void mem_free_views_gpu(Views &views_gpu) {
     cudaFree(views_gpu.depth);
     cudaFree(views_gpu.weight);
-    cudaFree(&views_gpu.rows);
-    cudaFree(&views_gpu.cols);
     cudaFree(views_gpu.K);
     cudaFree(views_gpu.R);
     cudaFree(views_gpu.T);
 }
 
-void mem_free_volume(Volume &vol_gpu) {
+void mem_free_volume_gpu(Volume &vol_gpu) {
     cudaFree(vol_gpu.data);
-    cudaFree(&vol_gpu.weight);
-    cudaFree(&vol_gpu.vol_dim);
-    cudaFree(&vol_gpu.voxel_size);
-    cudaFree(&vol_gpu.origin_x);
-    cudaFree(&vol_gpu.origin_y);
-    cudaFree(&vol_gpu.origin_z);
+    cudaFree(vol_gpu.weight);
 }
 
 #endif //TSDF_GPU_TSDF_H

@@ -5,7 +5,7 @@ import numpy
 
 
 extensions = [
-    Extension("tsdft",
+    Extension("tsdf",
               sources=["fusion.pyx"],
               include_dirs=["/usr/local/cuda/include/", numpy.get_include()],
               library_dirs=["./build/", "/usr/local/cuda/lib64",],
